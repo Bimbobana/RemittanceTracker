@@ -1,0 +1,3 @@
+date,loan_id,transaction_type,amount,balance_after
+2026-03-12,L001,loan_added,250000.0,250000.0
+2026-03-12,L002,loan_added,244885.0,244885.0
