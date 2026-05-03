@@ -1,133 +1,200 @@
 import streamlit as st
-import csv
-from datetime import date, datetime
+import pandas as pd
+import os
+from datetime import date
 
 LOANS_FILE = "loans.csv"
 LEDGER_FILE = "ledger.csv"
 
-# ------------------ Functions (same as before) ------------------
+st.title("Debt Repayment Dashboard")
 
-def add_loan(loan_id, loan_category, amount):
-    with open(LOANS_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([loan_id, loan_category, date.today(), amount])
-    add_ledger_entry(loan_id, "loan_added", amount, amount)
+# ------------------------------------------------
+# Initialize files
+# ------------------------------------------------
+if not os.path.exists(LOANS_FILE):
+    pd.DataFrame(columns=["loan_id","loan_category","date_created","amount"]).to_csv(LOANS_FILE,index=False)
 
-def load_loans():
-    loans = []
-    with open(LOANS_FILE, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            loans.append({
-                "loan_id": row["loan_id"],
-                "loan_category": row["loan_category"],
-                "date_created": datetime.strptime(row["date_created"], "%Y-%m-%d"),
-                "amount": float(row["amount"])
-            })
-    return loans
+if not os.path.exists(LEDGER_FILE):
+    pd.DataFrame(columns=["date","loan_id","transaction_type","amount","balance_after"]).to_csv(LEDGER_FILE,index=False)
 
-def add_ledger_entry(loan_id, transaction_type, amount, balance_after):
-    with open(LEDGER_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([date.today(), loan_id, transaction_type, amount, balance_after])
+# ------------------------------------------------
+# Load data
+# ------------------------------------------------
+loans_df = pd.read_csv(LOANS_FILE)
+ledger_df = pd.read_csv(LEDGER_FILE)
 
-def load_ledger_balances():
+if not loans_df.empty:
+    loans_df["date_created"] = pd.to_datetime(loans_df["date_created"])
+
+if not ledger_df.empty:
+    ledger_df["date"] = pd.to_datetime(ledger_df["date"])
+
+# ------------------------------------------------
+# Helper functions
+# ------------------------------------------------
+def get_balances():
     balances = {}
-    try:
-        with open(LEDGER_FILE, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                balances[row["loan_id"]] = float(row["balance_after"])
-    except FileNotFoundError:
-        pass
+    if not ledger_df.empty:
+        for _, row in ledger_df.iterrows():
+            balances[row["loan_id"]] = row["balance_after"]
     return balances
 
-def add_payment(loan_id, payment_amount, notes=""):
-    balances = load_ledger_balances()
-    prev_balance = balances.get(loan_id, 0)
-    new_balance = prev_balance - payment_amount
-    add_ledger_entry(loan_id, f"payment:{notes}", -payment_amount, new_balance)
+def add_ledger_entry(loan_id, ttype, amount, balance):
+    new_row = pd.DataFrame([[date.today(), loan_id, ttype, amount, balance]],
+                           columns=["date","loan_id","transaction_type","amount","balance_after"])
+    new_row.to_csv(LEDGER_FILE, mode="a", header=False, index=False)
 
-def apply_payment(payment_amount, notes=""):
-    loans = load_loans()
-    balances = load_ledger_balances()
+def add_loan(loan_id, category, amount):
+    new_loan = pd.DataFrame([[loan_id, category, date.today(), amount]],
+                            columns=["loan_id","loan_category","date_created","amount"])
+    new_loan.to_csv(LOANS_FILE, mode="a", header=False, index=False)
+    add_ledger_entry(loan_id, "loan_added", amount, amount)
+
+def apply_payment(payment_amount):
+    balances = get_balances()
     remaining = payment_amount
 
-    additional_loans = [l for l in loans if l["loan_category"] == "Additional"]
-    additional_loans.sort(key=lambda x: x["date_created"], reverse=True)
+    additional = loans_df[loans_df["loan_category"]=="Additional"].sort_values("date_created", ascending=False)
+    initial = loans_df[loans_df["loan_category"]=="Initial"]
 
-    for loan in additional_loans:
+    # pay additional first
+    for _, loan in additional.iterrows():
+        if remaining <= 0:
+            break
         loan_id = loan["loan_id"]
         balance = balances.get(loan_id, loan["amount"])
         if balance <= 0:
             continue
         pay = min(balance, remaining)
-        add_payment(loan_id, pay, notes)
+        new_balance = balance - pay
+        add_ledger_entry(loan_id, "payment", -pay, new_balance)
         remaining -= pay
+
+    # then initial
+    for _, loan in initial.iterrows():
         if remaining <= 0:
-            return
+            break
+        loan_id = loan["loan_id"]
+        balance = balances.get(loan_id, loan["amount"])
+        pay = min(balance, remaining)
+        new_balance = balance - pay
+        add_ledger_entry(loan_id, "payment", -pay, new_balance)
+        remaining -= pay
 
-    for loan in loans:
-        if loan["loan_category"] == "Initial":
-            add_payment(loan["loan_id"], remaining, notes)
-            return
+# ------------------------------------------------
+# Add Loan
+# ------------------------------------------------
+st.subheader("Add Loan")
 
-def calculate_balances():
-    return load_ledger_balances()
-
-def load_ledger():
-    """Return full ledger as a list of dicts"""
-    entries = []
-    try:
-        with open(LEDGER_FILE, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                entries.append(row)
-    except FileNotFoundError:
-        pass
-    return entries
-
-# ------------------ Streamlit Dashboard ------------------
-
-st.title("📊 Loan & Payment Tracker Dashboard")
-
-# Tabs for sections
-tab1, tab2, tab3 = st.tabs(["Add Loan", "Make Payment", "View Ledger"])
-
-with tab1:
-    st.header("Add New Loan")
+with st.form("loan_form"):
     loan_id = st.text_input("Loan ID")
-    loan_category = st.selectbox("Category", ["Initial", "Additional"])
-    amount = st.number_input("Amount", min_value=0.0, step=100.0)
-    if st.button("Add Loan"):
-        if loan_id and amount > 0:
-            add_loan(loan_id, loan_category, amount)
-            st.success(f"Loan {loan_id} added successfully.")
-        else:
-            st.error("Enter valid Loan ID and amount.")
+    category = st.selectbox("Category", ["Initial","Additional"])
+    amount = st.number_input("Amount", step=1000)
+    submit = st.form_submit_button("Add Loan")
 
-with tab2:
-    st.header("Make Payment")
-    payment_amount = st.number_input("Payment Amount", min_value=0.0, step=100.0)
-    notes = st.text_input("Notes (optional)")
-    if st.button("Apply Payment"):
-        if payment_amount > 0:
-            apply_payment(payment_amount, notes)
-            st.success(f"Payment of {payment_amount} applied automatically.")
-        else:
-            st.error("Enter a valid payment amount.")
+    if submit and loan_id and amount > 0:
+        add_loan(loan_id, category, amount)
+        st.success("Loan Added")
+        st.rerun()
 
-with tab3:
-    st.header("Current Balances")
-    balances = calculate_balances()
-    if balances:
-        st.table(balances)
-    else:
-        st.info("No loans or payments yet.")
+# ------------------------------------------------
+# Add Payment
+# ------------------------------------------------
+st.subheader("Make Payment")
 
-    st.subheader("Ledger History")
-    ledger_entries = load_ledger()
-    if ledger_entries:
-        st.dataframe(ledger_entries)
-    else:
-        st.info("Ledger is empty.")
+payment = st.number_input("Payment Amount", step=1000)
+
+if st.button("Apply Payment") and payment > 0:
+    apply_payment(payment)
+    st.success("Payment Applied")
+    st.rerun()
+
+# ------------------------------------------------
+# Reload after updates
+# ------------------------------------------------
+loans_df = pd.read_csv(LOANS_FILE)
+ledger_df = pd.read_csv(LEDGER_FILE)
+
+if not loans_df.empty:
+    loans_df["date_created"] = pd.to_datetime(loans_df["date_created"])
+
+if not ledger_df.empty:
+    ledger_df["date"] = pd.to_datetime(ledger_df["date"])
+
+# ------------------------------------------------
+# Build debt status
+# ------------------------------------------------
+balances = get_balances()
+
+results = []
+
+for _, loan in loans_df.iterrows():
+
+    loan_id = loan["loan_id"]
+    original = loan["amount"]
+    remaining = balances.get(loan_id, original)
+    paid = original - remaining
+
+    status = "Repaid" if remaining <= 0 else "Unpaid"
+
+    results.append({
+        "loan_id": loan_id,
+        "category": loan["loan_category"],
+        "date": loan["date_created"],
+        "original": original,
+        "paid": paid,
+        "remaining": remaining,
+        "status": status
+    })
+
+result_df = pd.DataFrame(results).sort_values("date")
+
+# ------------------------------------------------
+# Overview
+# ------------------------------------------------
+st.subheader("Overview")
+
+total_debt = result_df["original"].sum()
+remaining_debt = result_df["remaining"].sum()
+total_paid = total_debt - remaining_debt
+
+col1,col2,col3 = st.columns(3)
+
+col1.metric("Total Debt", f"¥{total_debt:,}")
+col2.metric("Total Paid", f"¥{total_paid:,}")
+col3.metric("Remaining Debt", f"¥{remaining_debt:,}")
+
+st.divider()
+
+# ------------------------------------------------
+# Debt Table
+# ------------------------------------------------
+st.subheader("Debt Status")
+st.dataframe(result_df)
+
+# ------------------------------------------------
+# Charts
+# ------------------------------------------------
+st.subheader("Debt Breakdown")
+chart_df = result_df.set_index("date")[["original","remaining"]]
+st.bar_chart(chart_df)
+
+st.subheader("Repayment Progress")
+progress_df = result_df.set_index("date")[["paid","remaining"]]
+st.bar_chart(progress_df)
+
+# ------------------------------------------------
+# Balance timeline
+# ------------------------------------------------
+if not ledger_df.empty:
+    ledger_df = ledger_df.sort_values("date")
+    ledger_df["total_balance"] = ledger_df["amount"].cumsum()
+
+    st.subheader("Balance Over Time")
+    st.line_chart(ledger_df.set_index("date")["total_balance"])
+
+# ------------------------------------------------
+# Ledger view
+# ------------------------------------------------
+st.subheader("Ledger History")
+st.dataframe(ledger_df)
